@@ -193,16 +193,16 @@ from  torch.cuda.amp import autocast
 
 
 class SpatialAttention(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, skip_features, up_features):
         super(SpatialAttention, self).__init__()
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-        self.conv11 = nn.Conv2d(channels, channels, kernel_size=1, padding='valid', stride=2, device=device)
-        self.conv12 = nn.Conv2d(channels, channels, kernel_size=1, padding='valid', stride=1, device=device)
+        self.conv11 = nn.Conv2d(skip_features, skip_features, kernel_size=1, padding='valid', stride=2, device=device) #Encoder
+        self.conv12 = nn.Conv2d(up_features, skip_features, kernel_size=1, padding='valid', stride=1, device=device) #Decoder
 
         self.relu = nn.ReLU()
 
-        self.conv2 = nn.Conv2d(channels, 1, kernel_size=1, padding='valid', stride=1, device=device)
+        self.conv2 = nn.Conv2d(skip_features, 1, kernel_size=1, padding='valid', stride=1, device=device)
         self.sigmoid = nn.Sigmoid()
 
         self.up = Upsample(scale_factor=2, mode='bilinear')
@@ -343,7 +343,6 @@ class Generic_UNet_AL(SegmentationNetwork):
                                                               self.norm_op_kwargs, self.dropout_op,
                                                               self.dropout_op_kwargs, self.nonlin, self.nonlin_kwargs,
                                                               first_stride, basic_block=basic_block))
-            self.attentions.append(SpatialAttention(channels=output_features))
 
             if not self.convolutional_pooling:
                 self.td.append(pool_op(pool_op_kernel_sizes[d]))
@@ -392,7 +391,7 @@ class Generic_UNet_AL(SegmentationNetwork):
             # the first conv reduces the number of features to match those of skip
             # the following convs work on that number of features
             # if not convolutional upsampling then the final conv reduces the num of features again
-            if u != num_pool - 1:
+            if u != num_pool - 1 and not self.convolutional_upsampling:
                 final_num_features = self.conv_blocks_context[-(3 + u)].output_channels
             else:
                 final_num_features = nfeatures_from_skip
@@ -413,6 +412,8 @@ class Generic_UNet_AL(SegmentationNetwork):
                                   self.norm_op, self.norm_op_kwargs, self.dropout_op, self.dropout_op_kwargs,
                                   self.nonlin, self.nonlin_kwargs, basic_block=basic_block)
             ))
+
+            self.attentions.append(SpatialAttention(skip_features=nfeatures_from_skip, up_features=nfeatures_from_down))
 
         for ds in range(len(self.conv_blocks_localization)):
             self.seg_outputs.append(conv_op(self.conv_blocks_localization[ds][-1].output_channels, num_classes,
@@ -458,7 +459,7 @@ class Generic_UNet_AL(SegmentationNetwork):
         for u in range(len(self.tu)):
             # print(u)
             features_flow = skips[-(u + 1)]
-            features_flow = self.attentions[-(u + 1)](features_flow, x)
+            features_flow = self.attentions[u](features_flow, x)
             x = self.tu[u](x)
             x = torch.cat((x, features_flow), dim=1)
             x = self.conv_blocks_localization[u](x)
